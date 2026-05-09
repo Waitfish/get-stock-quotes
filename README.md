@@ -2,6 +2,26 @@
 
 Hermes skill repository for fetching stock quotes.
 
+## Install
+
+Install the published skill with Hermes:
+
+```bash
+hermes skills install "skills-sh/Waitfish/get-stock-quotes/skills/get-stock-quotes" --yes
+```
+
+Check that Hermes sees it:
+
+```bash
+hermes skills check
+```
+
+Installed skill location:
+
+```text
+~/.hermes/skills/get-stock-quotes
+```
+
 ## Layout
 
 - `skills/get-stock-quotes/`: Hermes-discoverable skill directory
