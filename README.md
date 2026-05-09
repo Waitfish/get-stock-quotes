@@ -1,97 +1,31 @@
-# Hermes stock quote skill
+# get-stock-quotes
 
-This skill fetches a stock quote from Yahoo Finance by ticker symbol.
+Hermes skill repository for fetching stock quotes.
 
-It also supports direct Chinese A-share names such as `万科A` and `闻泰科技`.
+## Layout
 
-Hermes-compatible metadata lives in `SKILL.md`. The `skill.yaml` file is kept as local runtime metadata for this repository.
+- `skills/get-stock-quotes/`: Hermes-discoverable skill directory
+- `tests/`: local regression tests for the Python entrypoint
 
-## Files
+## Local development
 
-- `skill.yaml`: minimal Hermes skill metadata
-- `SKILL.md`: Hermes skill definition with frontmatter
-- `requirements.txt`: Python dependency list
-- `main.py`: entrypoint that reads a symbol and prints JSON
-
-## Install
+Install dependencies:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r skills/get-stock-quotes/requirements.txt
 ```
 
-## Usage
-
-Command line:
+Run the skill directly:
 
 ```bash
-python main.py --symbol AAPL
+python skills/get-stock-quotes/main.py --symbol 万科A
+python skills/get-stock-quotes/main.py --symbols "万科A,闻泰科技,北京君正"
 ```
 
-Command line with market hint:
+Run tests:
 
 ```bash
-python main.py --symbol 700 --market HK
+python3 -m unittest discover -s tests -v
 ```
-
-Command line with Chinese A-share name:
-
-```bash
-python main.py --symbol 万科A
-```
-
-Batch command line:
-
-```bash
-python main.py --symbols "万科A,闻泰科技,北京君正"
-```
-
-JSON via stdin:
-
-```bash
-printf '{"symbol":"MSFT"}' | python main.py
-```
-
-Plain symbol via stdin:
-
-```bash
-printf 'TSLA' | python main.py
-```
-
-## Output
-
-Success:
-
-```json
-{"symbol": "AAPL", "price": 189.84, "currency": "USD", "timestamp": "2026-05-06T13:45:00+00:00", "source": "yfinance"}
-```
-
-Failure:
-
-```json
-{"error": {"code": "SYMBOL_NOT_FOUND", "message": "No quote found for symbol: XXXX"}}
-```
-
-Batch success or partial success:
-
-```json
-{"results":[{"input":"万科A","symbol":"000002.SZ","price":4.0,"currency":"CNY","timestamp":"2026-05-09T00:00:00+00:00","source":"yfinance"},{"input":"不存在","error":{"code":"SYMBOL_NOT_FOUND","message":"No A-share symbol found for name: 不存在"}}],"success_count":1,"error_count":1}
-```
-
-## Symbol normalization
-
-- `600519` -> `600519.SS`
-- `000001` -> `000001.SZ`
-- `700` -> `0700.HK`
-- `00700` -> `0700.HK`
-- `sh600519` -> `600519.SS`
-- `hk0700` -> `0700.HK`
-- `万科A` -> `000002.SZ`
-- `闻泰科技` -> `600745.SS`
-
-## Batch input
-
-- `--symbols "万科A,闻泰科技,北京君正"`
-- `printf '万科A\n闻泰科技' | python main.py`
-- `printf '{"symbols":["万科A","闻泰科技"]}' | python main.py`

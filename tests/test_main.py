@@ -1,10 +1,18 @@
 import io
+import importlib.util
 import json
+from pathlib import Path
 import sys
 import unittest
 from unittest import mock
 
-import main
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "skills" / "get-stock-quotes" / "main.py"
+SPEC = importlib.util.spec_from_file_location("main", MODULE_PATH)
+main = importlib.util.module_from_spec(SPEC)
+sys.modules["main"] = main
+assert SPEC is not None and SPEC.loader is not None
+SPEC.loader.exec_module(main)
 
 
 class FakeSeries:
