@@ -1,0 +1,29 @@
+name: get-stock-quotes
+version: 0.1.0
+description: Local Python entrypoint for the Hermes get-stock-quotes skill.
+runtime: python3.11
+entrypoint: python main.py
+timeout_seconds: 15
+inputs:
+  - name: symbol
+    type: string
+    required: true
+    description: Stock symbol such as AAPL, MSFT, TSLA, 600519.SS.
+  - name: market
+    type: string
+    required: false
+    description: Optional market hint such as US, CN, or HK.
+outputs:
+  type: json
+  schema:
+    symbol: string
+    price: number
+    currency: string
+    timestamp: string
+    source: string
+hermes:
+  skill_file: SKILL.md
+tags:
+  - finance
+  - stock
+  - quote

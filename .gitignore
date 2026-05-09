@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Local cache used by the skill during Chinese A-share name resolution
+.cache/
