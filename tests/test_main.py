@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -13,32 +14,6 @@ main = importlib.util.module_from_spec(SPEC)
 sys.modules["main"] = main
 assert SPEC is not None and SPEC.loader is not None
 SPEC.loader.exec_module(main)
-
-
-class FakeSeries:
-    def __init__(self, values):
-        self.values = values
-
-    def dropna(self):
-        return self
-
-    @property
-    def iloc(self):
-        return self
-
-    def __getitem__(self, index):
-        return self.values[index]
-
-
-class FakeHistory:
-    def __init__(self, values):
-        self.empty = not values
-        self.values = values
-
-    def __getitem__(self, key):
-        if key != "Close":
-            raise KeyError(key)
-        return FakeSeries(self.values)
 
 
 class MainTests(unittest.TestCase):
@@ -109,66 +84,108 @@ class MainTests(unittest.TestCase):
         with mock.patch("main.resolve_a_share_name", return_value="300223"):
             self.assertEqual(main.resolve_symbol("北京君正", None), ("300223", "CN"))
 
-    def test_fetch_batch_quotes_returns_successes_and_errors(self):
-        def fake_fetch_quote_result(symbol, market):
-            if symbol == "不存在":
-                raise LookupError("No A-share symbol found for name: 不存在")
-            return {
-                "symbol": f"resolved-{symbol}",
-                "price": 1.23,
-                "currency": "CNY",
-                "timestamp": "2026-05-09T00:00:00+00:00",
-                "source": "yfinance",
+    def test_fetch_quotes_uses_cache_before_network(self):
+        cached_quote = {
+            "symbol": "000002.SZ",
+            "price": 4.0,
+            "currency": "CNY",
+            "timestamp": "2026-05-09T00:00:00+00:00",
+            "source": "eastmoney",
+        }
+        cache_payload = {
+            "000002.SZ": {
+                "fetched_at": time.time(),
+                "quote": cached_quote,
             }
-
-        with mock.patch("main.fetch_quote_result", side_effect=fake_fetch_quote_result):
-            payload = main.fetch_batch_quotes(["万科A", "不存在"], "CN")
-
-        self.assertEqual(payload["success_count"], 1)
-        self.assertEqual(payload["error_count"], 1)
-        self.assertEqual(payload["results"][0]["input"], "万科A")
-        self.assertEqual(payload["results"][0]["symbol"], "resolved-万科A")
-        self.assertEqual(payload["results"][1]["input"], "不存在")
-        self.assertEqual(payload["results"][1]["error"]["code"], "SYMBOL_NOT_FOUND")
-
-    def test_get_quote_uses_fast_info(self):
-        fake_module = mock.Mock()
-        fake_module.Ticker.return_value.fast_info = {
-            "lastPrice": 189.84,
-            "currency": "USD",
         }
 
-        with mock.patch("main.get_yfinance", return_value=fake_module):
-            quote = main.get_quote("AAPL")
+        with mock.patch("main.load_quote_cache", return_value=cache_payload), mock.patch(
+            "main.fetch_quote_from_domestic_sources"
+        ) as domestic_mock, mock.patch("main.get_yfinance_batch_quotes") as yahoo_batch_mock:
+            quotes, errors = main.fetch_quotes(["000002.SZ"])
 
-        self.assertEqual(quote["symbol"], "AAPL")
-        self.assertEqual(quote["price"], 189.84)
-        self.assertEqual(quote["currency"], "USD")
-        self.assertEqual(quote["source"], "yfinance")
+        self.assertEqual(quotes["000002.SZ"], cached_quote)
+        self.assertEqual(errors, {})
+        domestic_mock.assert_not_called()
+        yahoo_batch_mock.assert_not_called()
 
-    def test_get_quote_falls_back_to_history(self):
-        fake_ticker = mock.Mock()
-        fake_ticker.fast_info = {"currency": "HKD"}
-        fake_ticker.history.return_value = FakeHistory([412.6])
-        fake_module = mock.Mock()
-        fake_module.Ticker.return_value = fake_ticker
+    def test_fetch_quotes_prefers_domestic_source_for_cn_symbol(self):
+        domestic_quote = {
+            "symbol": "000002.SZ",
+            "price": 4.0,
+            "currency": "CNY",
+            "timestamp": "2026-05-09T00:00:00+00:00",
+            "source": "eastmoney",
+        }
 
-        with mock.patch("main.get_yfinance", return_value=fake_module):
-            quote = main.get_quote("0700.HK")
+        with mock.patch("main.load_quote_cache", return_value={}), mock.patch(
+            "main.fetch_quote_from_domestic_sources", return_value=domestic_quote
+        ) as domestic_mock, mock.patch("main.get_yfinance_batch_quotes") as yahoo_batch_mock, mock.patch(
+            "main.save_quote_cache"
+        ) as save_cache_mock:
+            quotes, errors = main.fetch_quotes(["000002.SZ"])
 
-        self.assertEqual(quote["price"], 412.6)
-        self.assertEqual(quote["currency"], "HKD")
+        self.assertEqual(quotes["000002.SZ"]["source"], "eastmoney")
+        self.assertEqual(errors, {})
+        domestic_mock.assert_called_once_with("000002.SZ")
+        yahoo_batch_mock.assert_not_called()
+        save_cache_mock.assert_called_once()
 
-    def test_get_quote_raises_when_no_data(self):
-        fake_ticker = mock.Mock()
-        fake_ticker.fast_info = {}
-        fake_ticker.history.return_value = FakeHistory([])
-        fake_module = mock.Mock()
-        fake_module.Ticker.return_value = fake_ticker
+    def test_fetch_quotes_falls_back_to_yahoo_when_domestic_fails(self):
+        yahoo_quote = {
+            "symbol": "000002.SZ",
+            "price": 4.01,
+            "currency": "CNY",
+            "timestamp": "2026-05-09T00:00:00+00:00",
+            "source": "yfinance",
+        }
 
-        with mock.patch("main.get_yfinance", return_value=fake_module):
-            with self.assertRaisesRegex(LookupError, "No quote found"):
-                main.get_quote("XXXX")
+        with mock.patch("main.load_quote_cache", return_value={}), mock.patch(
+            "main.fetch_quote_from_domestic_sources", side_effect=RuntimeError("domestic down")
+        ), mock.patch("main.get_yfinance_batch_quotes", return_value={"000002.SZ": yahoo_quote}) as yahoo_batch_mock, mock.patch(
+            "main.save_quote_cache"
+        ):
+            quotes, errors = main.fetch_quotes(["000002.SZ"])
+
+        self.assertEqual(quotes["000002.SZ"]["source"], "yfinance")
+        self.assertEqual(errors, {})
+        yahoo_batch_mock.assert_called_once_with(["000002.SZ"])
+
+    def test_prune_quote_cache_removes_expired_and_limits_size(self):
+        now = time.time()
+        quotes = {
+            "A": {"fetched_at": now - 10, "quote": {"symbol": "A"}},
+            "B": {"fetched_at": now - 20, "quote": {"symbol": "B"}},
+            "C": {"fetched_at": now - main.QUOTE_CACHE_TTL_SECONDS - 1, "quote": {"symbol": "C"}},
+        }
+
+        with mock.patch.object(main, "QUOTE_CACHE_MAX_ENTRIES", 1):
+            pruned = main.prune_quote_cache(quotes)
+
+        self.assertEqual(list(pruned.keys()), ["A"])
+
+    def test_fetch_quote_from_domestic_sources_orders_hk_sources(self):
+        calls = []
+
+        def fake_eastmoney(symbol):
+            calls.append("eastmoney")
+            raise LookupError("eastmoney down")
+
+        def fake_sina(symbol):
+            calls.append("sina")
+            return {"symbol": symbol, "price": 1.0, "currency": "HKD", "timestamp": "t", "source": "sina"}
+
+        def fake_tencent(symbol):
+            calls.append("tencent")
+            raise AssertionError("tencent should not be called")
+
+        with mock.patch("main.fetch_eastmoney_quote", side_effect=fake_eastmoney), mock.patch(
+            "main.fetch_sina_quote", side_effect=fake_sina
+        ), mock.patch("main.fetch_tencent_quote", side_effect=fake_tencent):
+            quote = main.fetch_quote_from_domestic_sources("0700.HK")
+
+        self.assertEqual(quote["source"], "sina")
+        self.assertEqual(calls, ["eastmoney", "sina"])
 
     def test_suppress_external_noise_hides_stderr_but_restores_it(self):
         stderr_buffer = io.StringIO()

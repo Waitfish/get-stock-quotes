@@ -10,7 +10,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 CN_SH_PREFIXES = ("600", "601", "603", "605", "688")
@@ -59,6 +59,8 @@ SUFFIX_ALIASES = {
     "HK": "HK",
 }
 A_SHARE_CACHE_TTL_SECONDS = 24 * 60 * 60
+QUOTE_CACHE_TTL_SECONDS = 30
+QUOTE_CACHE_MAX_ENTRIES = 256
 A_SHARE_UNIVERSE_URL = (
     "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=10000&po=1&np=1&fltt=2&invt=2"
     "&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23&fields=f12,f14"
@@ -70,6 +72,14 @@ A_SHARE_SEARCH_URL = (
 DEFAULT_HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json,text/plain,*/*",
+}
+TENCENT_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://gu.qq.com/",
+}
+SINA_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://finance.sina.com.cn/",
 }
 
 
@@ -131,9 +141,21 @@ def normalize_a_share_name(name: str) -> str:
     return normalized.upper()
 
 
-def get_cache_path() -> str:
+def get_cache_dir() -> str:
     skill_root = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(skill_root, ".cache", "a_share_symbols.json")
+    return os.path.join(skill_root, ".cache")
+
+
+def get_cache_path() -> str:
+    return os.path.join(get_cache_dir(), "a_share_symbols.json")
+
+
+def get_quote_cache_path() -> str:
+    return os.path.join(get_cache_dir(), "quotes.json")
+
+
+def get_quote_test_cache_path() -> str:
+    return os.path.join(get_cache_dir(), "quotes.test.json")
 
 
 def fetch_json(url: str) -> dict:
@@ -142,14 +164,34 @@ def fetch_json(url: str) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def load_a_share_cache() -> Optional[dict]:
-    cache_path = get_cache_path()
-    if not os.path.exists(cache_path):
+def fetch_text(url: str, headers: Optional[dict] = None, encoding: str = "utf-8") -> str:
+    request = urllib.request.Request(url, headers=headers or DEFAULT_HTTP_HEADERS)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return response.read().decode(encoding, errors="ignore")
+
+
+def load_json_file(path: str) -> Optional[dict]:
+    if not os.path.exists(path):
         return None
     try:
-        with open(cache_path, "r", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_json_file(path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    os.replace(temp_path, path)
+
+
+def load_a_share_cache() -> Optional[dict]:
+    payload = load_json_file(get_cache_path())
+    if payload is None:
         return None
 
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
@@ -158,10 +200,52 @@ def load_a_share_cache() -> Optional[dict]:
 
 
 def save_a_share_cache(entries: list) -> None:
-    cache_path = get_cache_path()
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    with open(cache_path, "w", encoding="utf-8") as handle:
-        json.dump({"fetched_at": time.time(), "entries": entries}, handle, ensure_ascii=False)
+    save_json_file(get_cache_path(), {"fetched_at": time.time(), "entries": entries})
+
+
+def load_quote_cache() -> dict:
+    payload = load_json_file(get_quote_cache_path())
+    quotes = payload.get("quotes") if isinstance(payload, dict) else None
+    return quotes if isinstance(quotes, dict) else {}
+
+
+def save_quote_cache(quotes: dict) -> None:
+    save_json_file(get_quote_cache_path(), {"quotes": quotes})
+
+
+def prune_quote_cache(quotes: dict) -> dict:
+    valid_entries = []
+    now = time.time()
+    for symbol, cached in quotes.items():
+        if not isinstance(cached, dict):
+            continue
+        fetched_at = cached.get("fetched_at")
+        quote = cached.get("quote")
+        if not isinstance(fetched_at, (int, float)) or not isinstance(quote, dict):
+            continue
+        if now - fetched_at > QUOTE_CACHE_TTL_SECONDS:
+            continue
+        valid_entries.append((symbol, cached))
+
+    valid_entries.sort(key=lambda item: item[1]["fetched_at"], reverse=True)
+    return dict(valid_entries[:QUOTE_CACHE_MAX_ENTRIES])
+
+
+def get_cached_quote(quotes: dict, symbol: str) -> Optional[dict]:
+    cached = quotes.get(symbol)
+    if not isinstance(cached, dict):
+        return None
+    fetched_at = cached.get("fetched_at")
+    quote = cached.get("quote")
+    if not isinstance(fetched_at, (int, float)) or not isinstance(quote, dict):
+        return None
+    if time.time() - fetched_at > QUOTE_CACHE_TTL_SECONDS:
+        return None
+    return quote
+
+
+def set_cached_quote(quotes: dict, quote: dict) -> None:
+    quotes[quote["symbol"]] = {"fetched_at": time.time(), "quote": quote}
 
 
 def fetch_a_share_entries() -> list:
@@ -389,29 +473,194 @@ def fetch_quote_result(symbol: str, market: Optional[str]) -> dict:
     return get_quote(normalized_symbol)
 
 
-def fetch_batch_quotes(symbols: List[str], market: Optional[str]) -> dict:
-    results = []
-    success_count = 0
-    error_count = 0
+def infer_currency_from_symbol(symbol: str) -> str:
+    if symbol.endswith((".SS", ".SZ", ".BJ")):
+        return "CNY"
+    if symbol.endswith(".HK"):
+        return "HKD"
+    return "UNKNOWN"
 
-    for input_symbol in symbols:
-        try:
-            quote = fetch_quote_result(input_symbol, market)
-        except Exception as exc:
-            results.append({"input": input_symbol, "error": format_error(exc)})
-            error_count += 1
-        else:
-            results.append({"input": input_symbol, **quote})
-            success_count += 1
 
+def get_eastmoney_price_scale(symbol: str) -> int:
+    if symbol.endswith(".HK"):
+        return 1000
+    return 100
+
+
+def extract_latest_close(history, symbol: str) -> float:
+    close_series = history[(symbol, "Close")].dropna()
+    if close_series.empty:
+        raise LookupError(f"No quote found for symbol: {symbol}")
+    return float(close_series.iloc[-1])
+
+
+def make_quote(symbol: str, price: float, currency: Optional[str], source: str) -> dict:
     return {
-        "results": results,
-        "success_count": success_count,
-        "error_count": error_count,
+        "symbol": symbol,
+        "price": float(price),
+        "currency": currency or infer_currency_from_symbol(symbol),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": source,
     }
 
 
-def get_quote(symbol: str) -> dict:
+def is_cn_symbol(symbol: str) -> bool:
+    return symbol.endswith((".SS", ".SZ", ".BJ"))
+
+
+def is_hk_symbol(symbol: str) -> bool:
+    return symbol.endswith(".HK")
+
+
+def prefers_domestic_sources(symbol: str) -> bool:
+    return is_cn_symbol(symbol) or is_hk_symbol(symbol)
+
+
+def get_cn_provider_prefix(symbol: str) -> Optional[str]:
+    if symbol.endswith(".SS"):
+        return "sh"
+    if symbol.endswith(".SZ"):
+        return "sz"
+    if symbol.endswith(".BJ"):
+        return "bj"
+    return None
+
+
+def get_hk_provider_code(symbol: str) -> Optional[str]:
+    if not is_hk_symbol(symbol):
+        return None
+    return symbol.split(".", 1)[0].zfill(5)
+
+
+def get_eastmoney_secids(symbol: str) -> List[str]:
+    if symbol.endswith(".SS"):
+        return [f"1.{symbol[:6]}"]
+    if symbol.endswith(".SZ"):
+        return [f"0.{symbol[:6]}"]
+    if symbol.endswith(".HK"):
+        hk_code = get_hk_provider_code(symbol)
+        return [f"116.{hk_code}", f"128.{hk_code}"] if hk_code is not None else []
+    return []
+
+
+def get_tencent_symbol(symbol: str) -> Optional[str]:
+    prefix = get_cn_provider_prefix(symbol)
+    if prefix is not None:
+        return f"{prefix}{symbol[:6]}"
+    if symbol.endswith(".HK"):
+        hk_code = get_hk_provider_code(symbol)
+        return f"hk{hk_code}" if hk_code is not None else None
+    return None
+
+
+def get_sina_symbol(symbol: str) -> Optional[str]:
+    prefix = get_cn_provider_prefix(symbol)
+    if prefix in {"sh", "sz"}:
+        return f"{prefix}{symbol[:6]}"
+    if symbol.endswith(".HK"):
+        hk_code = get_hk_provider_code(symbol)
+        return f"rt_hk{hk_code}" if hk_code is not None else None
+    return None
+
+
+def fetch_eastmoney_quote(symbol: str) -> dict:
+    secids = get_eastmoney_secids(symbol)
+    if not secids:
+        raise LookupError(f"Eastmoney does not support symbol: {symbol}")
+    last_error = None
+    for secid in secids:
+        try:
+            payload = fetch_json(
+                f"https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields=f43,f57,f58"
+            )
+            data = payload.get("data") or {}
+            raw_price = data.get("f43")
+            if raw_price in (None, "", "-"):
+                raise LookupError(f"No quote found for symbol: {symbol}")
+            scale = get_eastmoney_price_scale(symbol)
+            return make_quote(symbol, float(raw_price) / scale, infer_currency_from_symbol(symbol), "eastmoney")
+        except Exception as exc:
+            last_error = exc
+    raise last_error if last_error is not None else LookupError(f"No quote found for symbol: {symbol}")
+
+
+def fetch_tencent_quote(symbol: str) -> dict:
+    provider_symbol = get_tencent_symbol(symbol)
+    if provider_symbol is None:
+        raise LookupError(f"Tencent does not support symbol: {symbol}")
+    payload = fetch_text(f"https://qt.gtimg.cn/q={provider_symbol}", headers=TENCENT_HTTP_HEADERS, encoding="gbk")
+    match = re.search(r'="([^"]+)";', payload)
+    if not match:
+        raise LookupError(f"No quote found for symbol: {symbol}")
+    fields = match.group(1).split("~")
+    if len(fields) < 4 or not fields[3]:
+        raise LookupError(f"No quote found for symbol: {symbol}")
+    return make_quote(symbol, float(fields[3]), infer_currency_from_symbol(symbol), "tencent")
+
+
+def fetch_sina_quote(symbol: str) -> dict:
+    provider_symbol = get_sina_symbol(symbol)
+    if provider_symbol is None:
+        raise LookupError(f"Sina does not support symbol: {symbol}")
+    provider_symbols = [provider_symbol]
+    hk_code = get_hk_provider_code(symbol)
+    if hk_code is not None:
+        provider_symbols.append(f"hk{hk_code}")
+
+    last_error = None
+    for current_provider_symbol in provider_symbols:
+        try:
+            payload = fetch_text(
+                f"https://hq.sinajs.cn/list={current_provider_symbol}", headers=SINA_HTTP_HEADERS, encoding="gbk"
+            )
+            match = re.search(r'="([^"]*)";', payload)
+            if not match:
+                raise LookupError(f"No quote found for symbol: {symbol}")
+            fields = match.group(1).split(",")
+            if len(fields) < 4 or not fields[3]:
+                raise LookupError(f"No quote found for symbol: {symbol}")
+            return make_quote(symbol, float(fields[3]), infer_currency_from_symbol(symbol), "sina")
+        except Exception as exc:
+            last_error = exc
+    raise last_error if last_error is not None else LookupError(f"No quote found for symbol: {symbol}")
+
+
+def fetch_quote_from_domestic_sources(symbol: str) -> dict:
+    last_error = None
+    if is_hk_symbol(symbol):
+        fetchers = (fetch_eastmoney_quote, fetch_sina_quote, fetch_tencent_quote)
+    else:
+        fetchers = (fetch_eastmoney_quote, fetch_tencent_quote, fetch_sina_quote)
+    for fetcher in fetchers:
+        try:
+            return fetcher(symbol)
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise LookupError(f"No quote found for symbol: {symbol}")
+
+
+def get_yfinance_batch_quotes(symbols: List[str]) -> Dict[str, dict]:
+    with suppress_external_noise():
+        history = get_yfinance().download(
+            " ".join(symbols),
+            period="1d",
+            interval="1m",
+            progress=False,
+            threads=False,
+            group_by="ticker",
+            auto_adjust=False,
+        )
+
+    quotes = {}
+    for symbol in symbols:
+        price = extract_latest_close(history, symbol)
+        quotes[symbol] = make_quote(symbol, price, infer_currency_from_symbol(symbol), "yfinance")
+    return quotes
+
+
+def get_yfinance_quote(symbol: str) -> dict:
     with suppress_external_noise():
         ticker = get_yfinance().Ticker(symbol)
         info = ticker.fast_info
@@ -424,13 +673,107 @@ def get_quote(symbol: str) -> dict:
                 raise LookupError(f"No quote found for symbol: {symbol}")
             price = float(history["Close"].dropna().iloc[-1])
 
+    return make_quote(symbol, price, currency, "yfinance")
+
+
+def fetch_quotes(symbols: List[str]) -> Tuple[Dict[str, dict], Dict[str, Exception]]:
+    cache = prune_quote_cache(load_quote_cache())
+    cache_changed = False
+    quotes: Dict[str, dict] = {}
+    errors: Dict[str, Exception] = {}
+    missing_symbols = []
+
+    for symbol in symbols:
+        cached_quote = get_cached_quote(cache, symbol)
+        if cached_quote is not None:
+            quotes[symbol] = cached_quote
+        else:
+            missing_symbols.append(symbol)
+
+    yahoo_symbols = []
+    for symbol in missing_symbols:
+        if prefers_domestic_sources(symbol):
+            try:
+                quote = fetch_quote_from_domestic_sources(symbol)
+            except Exception:
+                yahoo_symbols.append(symbol)
+            else:
+                quotes[symbol] = quote
+                set_cached_quote(cache, quote)
+                cache_changed = True
+        else:
+            yahoo_symbols.append(symbol)
+
+    if yahoo_symbols:
+        try:
+            yahoo_quotes = get_yfinance_batch_quotes(yahoo_symbols)
+        except Exception:
+            yahoo_quotes = {}
+
+        for symbol in yahoo_symbols:
+            quote = yahoo_quotes.get(symbol)
+            if quote is None:
+                try:
+                    quote = get_yfinance_quote(symbol)
+                except Exception as exc:
+                    errors[symbol] = exc
+                    continue
+            quotes[symbol] = quote
+            set_cached_quote(cache, quote)
+            cache_changed = True
+
+    if cache_changed:
+        save_quote_cache(prune_quote_cache(cache))
+
+    return quotes, errors
+
+
+def fetch_batch_quotes(symbols: List[str], market: Optional[str]) -> dict:
+    results = [None] * len(symbols)
+    success_count = 0
+    error_count = 0
+    pending_results = []
+    normalized_symbols = []
+
+    for index, input_symbol in enumerate(symbols):
+        try:
+            resolved_symbol, resolved_market = resolve_symbol(input_symbol, market)
+            normalized_symbol = normalize_symbol(resolved_symbol, resolved_market)
+        except Exception as exc:
+            results[index] = {"input": input_symbol, "error": format_error(exc)}
+            error_count += 1
+        else:
+            pending_results.append((index, input_symbol, normalized_symbol))
+            if normalized_symbol not in normalized_symbols:
+                normalized_symbols.append(normalized_symbol)
+
+    if normalized_symbols:
+        batch_quotes, batch_errors = fetch_quotes(normalized_symbols)
+
+        for index, input_symbol, normalized_symbol in pending_results:
+            quote = batch_quotes.get(normalized_symbol)
+            if quote is None:
+                exc = batch_errors.get(normalized_symbol, LookupError(f"No quote found for symbol: {normalized_symbol}"))
+                results[index] = \
+                    {"input": input_symbol, "error": format_error(exc)}
+                error_count += 1
+            else:
+                results[index] = {"input": input_symbol, **quote}
+                success_count += 1
+
     return {
-        "symbol": symbol,
-        "price": float(price),
-        "currency": currency or "UNKNOWN",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "yfinance",
+        "results": [result for result in results if result is not None],
+        "success_count": success_count,
+        "error_count": error_count,
     }
+
+
+def get_quote(symbol: str) -> dict:
+    quotes, errors = fetch_quotes([symbol])
+    quote = quotes.get(symbol)
+    if quote is not None:
+        return quote
+    raise errors.get(symbol, LookupError(f"No quote found for symbol: {symbol}"))
 
 
 def emit(data: dict, exit_code: int = 0) -> None:

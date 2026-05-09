@@ -4,7 +4,13 @@ Hermes skill repository for fetching stock quotes.
 
 ## Install
 
-Install the published skill with Hermes:
+Install the published skill with Hermes using the published `SKILL.md` URL:
+
+```bash
+hermes skills install "https://waitfish.github.io/get-stock-quotes/.well-known/skills/get-stock-quotes/SKILL.md" --yes
+```
+
+Alternative GitHub / skills.sh install path:
 
 ```bash
 hermes skills install "skills-sh/Waitfish/get-stock-quotes/skills/get-stock-quotes" --yes
@@ -35,6 +41,12 @@ You can also try natural language without preloading the skill:
 ```bash
 hermes chat -Q -q "查询 万科A 和 闻泰科技 的最新行情。"
 ```
+
+## Published Endpoints
+
+- Well-known index: `https://waitfish.github.io/get-stock-quotes/.well-known/skills/index.json`
+- Well-known skill: `https://waitfish.github.io/get-stock-quotes/.well-known/skills/get-stock-quotes/SKILL.md`
+- GitHub repository: `https://github.com/Waitfish/get-stock-quotes`
 
 ## Layout
 
