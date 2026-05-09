@@ -22,6 +22,20 @@ Installed skill location:
 ~/.hermes/skills/get-stock-quotes
 ```
 
+## Hermes Chat Example
+
+Call the skill explicitly in Hermes chat:
+
+```bash
+hermes chat -Q -s "get-stock-quotes" -q "请使用 get-stock-quotes 技能查询 万科A 和 闻泰科技 的最新行情，并返回结构化结果。"
+```
+
+You can also try natural language without preloading the skill:
+
+```bash
+hermes chat -Q -q "查询 万科A 和 闻泰科技 的最新行情。"
+```
+
 ## Layout
 
 - `skills/get-stock-quotes/`: Hermes-discoverable skill directory
