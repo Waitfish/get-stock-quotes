@@ -132,8 +132,8 @@ def normalize_a_share_name(name: str) -> str:
 
 
 def get_cache_path() -> str:
-    cache_root = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(cache_root, "get-stock-quotes", "a_share_symbols.json")
+    skill_root = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(skill_root, ".cache", "a_share_symbols.json")
 
 
 def fetch_json(url: str) -> dict:
