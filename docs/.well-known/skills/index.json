@@ -1,0 +1,11 @@
+{
+  "skills": [
+    {
+      "name": "get-stock-quotes",
+      "description": "Fetch stock quotes by ticker symbol with local Python code, including auto-normalization for A-share and Hong Kong symbols.",
+      "files": [
+        "SKILL.md"
+      ]
+    }
+  ]
+}
